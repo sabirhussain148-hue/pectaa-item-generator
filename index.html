@@ -589,9 +589,129 @@ function passageFor(slo,total,kmax){
   return{text:txt,pages:m.map(function(x){return x.n})}}
 function pagesLabel(a){if(!a.length)return '';var o=[],s=a[0],p=a[0];for(var i=1;i<=a.length;i++){if(a[i]===p+1){p=a[i];continue}o.push(s===p?String(s):s+'–'+p);s=a[i];p=a[i]}return o.join(', ')}
 
+
+/* ================= standalone AI: the teacher's own key (works outside claude.ai) ================= */
+var STANDALONE=!(window.claude&&window.claude.use);
+var SVC={
+ gemini:{n:'Google Gemini — free key available',keyUrl:'https://aistudio.google.com/apikey',tip:'Free: sign in with any Google account and press “Create API key”. No card needed. A paid Gemini key also works here.'},
+ openrouter:{n:'OpenRouter — many free models',base:'https://openrouter.ai/api/v1',keyUrl:'https://openrouter.ai/keys',tip:'Free: make an account, create a key, and choose a model marked (free).'},
+ groq:{n:'Groq — free key available',base:'https://api.groq.com/openai/v1',keyUrl:'https://console.groq.com/keys',tip:'Free: make an account and create a key. Fast, but weaker at Urdu than Gemini.'},
+ openai:{n:'OpenAI (ChatGPT) — paid key',base:'https://api.openai.com/v1',keyUrl:'https://platform.openai.com/api-keys',tip:'Needs a paid OpenAI API account. A ChatGPT Plus subscription is not an API key.'}};
+var AI={svc:'gemini',keys:{},models:{},lists:{},busy:false,err:''};
+function aiSave(){try{localStorage.setItem('pm_ai',JSON.stringify({svc:AI.svc,keys:AI.keys,models:AI.models}))}catch(e){}}
+function aiLoad(){try{var o=JSON.parse(localStorage.getItem('pm_ai')||'null');if(o){if(SVC[o.svc])AI.svc=o.svc;AI.keys=o.keys||{};AI.models=o.models||{}}}catch(e){}}
+function aiKey(){return (AI.keys[AI.svc]||'').trim()}
+function aiModel(){return AI.models[AI.svc]||''}
+function aiErr(code,message,fatal,raw){return{api:true,code:code,message:message,fatal:!!fatal,raw:raw||''}}
+function aiWait(ms,signal){return new Promise(function(res,rej){var t=setTimeout(res,ms);if(signal)signal.addEventListener('abort',function(){clearTimeout(t);rej(aiErr('cancelled','Stopped.'))},{once:true})})}
+async function aiFetch(url,init,signal){
+  var r;init=init||{};init.signal=signal;
+  try{r=await fetch(url,init)}catch(e){
+    if(signal&&signal.aborted)throw aiErr('cancelled','Stopped.');
+    throw aiErr('network','The AI service could not be reached. Check your internet connection and try again.',false,String(e&&e.message||e))}
+  var txt=await r.text(),j=null;try{j=JSON.parse(txt)}catch(e){}
+  if(r.ok&&j)return j;
+  var em=(j&&j.error&&(j.error.message||(typeof j.error==='string'?j.error:'')))||txt.slice(0,300)||('HTTP '+r.status);
+  var nm=SVC[AI.svc].n.split(' — ')[0];
+  if(r.status===429){
+    var ra=parseFloat(r.headers.get('retry-after')||'')||0,m=/retry in ([\d.]+)\s*s/i.exec(em);if(m)ra=parseFloat(m[1]);
+    var hm=/retry in (\d+)h/i.exec(em),daily=!!hm||/per\s*day|daily/i.test(em);
+    throw{api:true,code:'rate_limited',status:429,wait:ra,daily:daily,fatal:true,raw:em,
+      message:daily?(nm+': today’s free limit for this model is used up. Choose another model or another service above, or try again tomorrow.'):(nm+': too many requests in a short time. Wait a minute, then press “Generate missing”.')}}
+  if(r.status===401||r.status===403||/api key not valid|invalid api key|incorrect api key|no auth|unauthorized/i.test(em))
+    throw aiErr('bad_key',nm+' did not accept this key. Check that the whole key was pasted, with no spaces.',true,em);
+  if(r.status===404)throw aiErr('bad_model',nm+' does not know the chosen model. Press “Load models” again and choose another.',true,em);
+  if(r.status===402)throw aiErr('no_credit',nm+': this model needs paid credit. Choose a model marked (free).',true,em);
+  if(r.status===413||/too large|context length|maximum context|too many tokens/i.test(em))throw aiErr('prompt_too_large','The request was too large for this model. Choose a model with a bigger limit.',true,em);
+  throw aiErr(r.status>=500?'upstream_error':'http_'+r.status,nm+' answered with an error: '+em.slice(0,220),false,em)}
+function aiHeaders(){var k=aiKey();return AI.svc==='gemini'?{'x-goog-api-key':k,'Content-Type':'application/json'}:{'Authorization':'Bearer '+k,'Content-Type':'application/json'}}
+function verNum(id){var m=/(\d+(?:\.\d+)?)/.exec(id);return m?parseFloat(m[1]):0}
+async function aiLoadModels(){
+  var sv=AI.svc,list=[],bad=/image|tts|live|embed|audio|robotic|computer|native|whisper|guard|moderat|realtime|transcri|dall|sora|speech|rerank|search/i;
+  if(sv==='gemini'){
+    var j=await aiFetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',{headers:aiHeaders()});
+    (j.models||[]).forEach(function(m){var id=String(m.name||'').replace(/^models\//,'');
+      if(/^gemini-/.test(id)&&(m.supportedGenerationMethods||[]).indexOf('generateContent')>=0&&!bad.test(id))list.push({id:id,label:m.displayName||id})});
+    var rank=function(x){return verNum(x.id)*10+(/flash/.test(x.id)?(/lite/.test(x.id)?2:3):1)-(/preview|exp/.test(x.id)?0.5:0)};
+    list.sort(function(a,b){return rank(b)-rank(a)});
+  }else if(sv==='openrouter'){
+    var j2=await aiFetch(SVC[sv].base+'/models',{});
+    var fr=[],pd=[];(j2.data||[]).forEach(function(m){var out=(m.architecture&&m.architecture.output_modalities)||['text'];if(out.indexOf('text')<0)return;
+      var free=/:free$/.test(m.id)||(m.pricing&&+m.pricing.prompt===0&&+m.pricing.completion===0);
+      var img=((m.architecture&&m.architecture.input_modalities)||[]).indexOf('image')>=0;
+      (free?fr:pd).push({id:m.id,label:(free?'':'(paid) ')+(m.name||m.id)+(free&&!/free/i.test(m.name||'')?' (free)':''),img:img,ctx:m.context_length||0})});
+    fr.sort(function(a,b){return (b.img-a.img)||(b.ctx-a.ctx)});
+    list=fr.concat(pd);
+    if(aiKey())await aiFetch(SVC[sv].base+'/key',{headers:aiHeaders()});
+  }else{
+    var j3=await aiFetch(SVC[sv].base+'/models',{headers:aiHeaders()});
+    (j3.data||[]).forEach(function(m){if(m.id&&!bad.test(m.id))list.push({id:m.id,label:m.id})});
+    var rk=sv==='groq'?function(x){return (/versatile|70b|120b/.test(x.id)?2:0)+(/llama|gpt-oss|qwen|kimi/.test(x.id)?1:0)}:function(x){return (/^gpt-/.test(x.id)?verNum(x.id):0)+(/mini/.test(x.id)?0.4:0)-(/nano|codex|instruct|chat-latest|\d{4}-\d\d/.test(x.id)?5:0)};
+    list.sort(function(a,b){return rk(b)-rk(a)||(a.id<b.id?-1:1)});
+  }
+  if(!list.length)throw aiErr('no_models','No usable model was found for this key.',true);
+  AI.lists[sv]=list;
+  if(!AI.models[sv]||!list.some(function(x){return x.id===AI.models[sv]}))AI.models[sv]=list[0].id;
+  aiSave();return list}
+function blobB64(b){return new Promise(function(res,rej){var fr=new FileReader();fr.onload=function(){res(String(fr.result).split(',')[1]||'')};fr.onerror=rej;fr.readAsDataURL(b)})}
+var aiGate=Promise.resolve();
+async function apiSample(prompt,opts){
+  opts=opts||{};var sv=AI.svc,model=aiModel(),sig=opts.signal;
+  if(!aiKey())throw aiErr('no_key','No key has been entered yet. Open step 3, paste your key and press Connect.',true);
+  if(!model)throw aiErr('no_model','No model is chosen yet. Open step 3 and press Connect.',true);
+  var imgs=[];if(opts.images)for(var i=0;i<opts.images.length;i++)imgs.push(await blobB64(opts.images[i]));
+  var url,body;
+  if(sv==='gemini'){
+    url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent';
+    body={contents:[{role:'user',parts:[{text:prompt}].concat(imgs.map(function(d){return{inlineData:{mimeType:'image/jpeg',data:d}}}))}]};
+  }else{
+    url=SVC[sv].base+'/chat/completions';
+    body={model:model,messages:[{role:'user',content:imgs.length?[{type:'text',text:prompt}].concat(imgs.map(function(d){return{type:'image_url',image_url:{url:'data:image/jpeg;base64,'+d}}})):prompt}]};
+  }
+  var j=null;
+  for(var attempt=1;;attempt++){
+    try{j=await aiFetch(url,{method:'POST',headers:aiHeaders(),body:JSON.stringify(body)},sig);break}
+    catch(e){
+      var retry=e&&e.api&&((e.code==='rate_limited'&&!e.daily&&(e.wait||0)<=90)||e.code==='upstream_error'||e.code==='network');
+      if(!retry||attempt>=4)throw e;
+      var w=e.code==='rate_limited'?Math.max(8,Math.ceil(e.wait||20)+2):5*attempt;
+      try{logw('The AI service asked us to slow down — waiting '+w+' s, then trying again (attempt '+(attempt+1)+' of 4).','warn');render()}catch(x){}
+      await aiWait(w*1000,sig)}}
+  var text='',trunc=false;
+  if(sv==='gemini'){
+    var c=j.candidates&&j.candidates[0];
+    if(!c){var br=j.promptFeedback&&j.promptFeedback.blockReason;throw aiErr('blocked','Gemini returned no answer'+(br?' ('+br+')':'')+'.',false,JSON.stringify(j).slice(0,300))}
+    ((c.content&&c.content.parts)||[]).forEach(function(p){if(p.text&&!p.thought)text+=p.text});
+    trunc=c.finishReason==='MAX_TOKENS';
+  }else{
+    var ch=j.choices&&j.choices[0];
+    if(!ch)throw aiErr('upstream_error','The AI service returned no answer.',false,JSON.stringify(j).slice(0,300));
+    var ct=ch.message&&ch.message.content;
+    text=typeof ct==='string'?ct:Array.isArray(ct)?ct.map(function(p){return p.text||''}).join(''):'';
+    trunc=ch.finish_reason==='length';
+  }
+  if(!text)throw aiErr('empty','The AI returned an empty answer. Try again or choose another model.',false);
+  if(opts.onText)try{opts.onText({text:text})}catch(e){}
+  return{text:text,truncated:trunc}}
+apiSample.limits=async function(){return{images:{maxCount:3}}};
+function aiShim(){return apiSample}
+function provName(){return({claude:STANDALONE?'AI key':'Claude',chatgpt:'ChatGPT',grok:'Grok',gemini:'Gemini'})[S.prov]||'the AI'}
+function aiPanel(){
+  var sv=AI.svc,d=SVC[sv],list=AI.lists[sv]||[],key=aiKey();
+  var h='<div class="sub" style="padding:14px;display:flex;flex-direction:column;gap:10px"><b>Your AI key <span class="note">(saved only in this browser, on this device)</span></b>'
+   +'<div class="row"><label class="lb">AI service<select id="aisvc">'+Object.keys(SVC).map(function(k){return '<option value="'+k+'"'+(k===sv?' selected':'')+'>'+esc(SVC[k].n)+'</option>'}).join('')+'</select></label></div>'
+   +note(esc(d.tip)+' <a href="'+d.keyUrl+'" target="_blank" rel="noopener">Get a key ↗</a>')
+   +'<label class="lb">Paste your key<input id="aikey" class="txt" type="password" autocomplete="off" spellcheck="false" dir="ltr" style="width:100%" value="'+esc(AI.keys[sv]||'')+'" placeholder="paste the key here"></label>'
+   +'<div class="row"><button class="btn" data-a="aiconn"'+(AI.busy?' disabled':'')+'>'+(AI.busy?'<span class="spin"></span> Loading…':(list.length?'Reload models':'Connect — load models'))+'</button>'
+   +(list.length?'<label class="lb">Model<select id="aimodel">'+list.map(function(m){return '<option value="'+esc(m.id)+'"'+(m.id===aiModel()?' selected':'')+'>'+esc(m.label)+'</option>'}).join('')+'</select></label>':'')+'</div>';
+  if(AI.err)h+=msg(esc(AI.err),'bad');
+  if(list.length)h+='<div class="row"><button class="btn" data-a="test"'+(S.test&&S.test.st==='run'?' disabled':'')+'>⚡ '+(S.connected?'Test again':'Test this model')+'</button></div>'
+     +note('Press <b>Test this model</b> once. The page checks that the AI answers and can write a real question in the needed format. Then go to the next step and press Generate.'+(sv==='gemini'?' On a free Gemini key each model has a small daily limit; if it runs out, choose another model in the list.':''));
+  else h+=note('No paid plan is needed: a free Google Gemini key is enough. If you do not want to make any key at all, choose ChatGPT, Gemini or Grok above — the page gives you a ready prompt to copy into the free chat and you paste the reply back.');
+  return h+'</div>'+testHtml()}
+
 /* ---- Claude via the sample capability ---- */
 var SAMP;
-async function getSample(){if(SAMP!==undefined)return SAMP;try{SAMP=(window.claude&&claude.use)?await claude.use('sample'):null}catch(e){SAMP=null}return SAMP}
 async function renderPageBlob(pn){
   var pg=await PDFDOC.getPage(pn),vp0=pg.getViewport({scale:1}),sc=Math.min(2,1500/Math.max(vp0.width,vp0.height)),vp=pg.getViewport({scale:sc});
   var cv=document.createElement('canvas');cv.width=Math.ceil(vp.width);cv.height=Math.ceil(vp.height);
@@ -619,7 +739,7 @@ async function ocrRun(){
       BOOK.ocrN++;
     }catch(e){
       if(e&&e.code==='cancelled')break;
-      S.ocr.err=(e&&e.code==='not_granted')?'You did not allow this page to use Claude.':(e&&e.code==='rate_limited')?'Claude usage limit reached; try again in a few minutes.':'Page reading failed'+(e&&e.code?' ('+e.code+')':'')+(e&&e.message?': '+e.message:'')+'.';
+      S.ocr.err=(e&&e.code==='not_granted')?'You did not allow this page to use Claude.':(e&&e.code==='rate_limited')?(e.api?e.message:'Claude usage limit reached; try again in a few minutes.'):(e&&e.api)?e.message:'Page reading failed'+(e&&e.code?' ('+e.code+')':'')+(e&&e.message?': '+e.message:'')+'.';
       break}
     S.ocr.done=Math.min(list.length,i+grp.length);evalBook();render()}
   S.ocr.running=false;S.ocr.ctl=null;evalBook()}
@@ -876,9 +996,9 @@ function extractItems(text){ // every COMPLETE {...} object inside the "items" a
   return out}
 
 /* ================= calling Claude (the sample capability) ================= */
-var SAMP;
-async function getSample(){if(SAMP)return SAMP;try{SAMP=(window.claude&&claude.use)?await claude.use('sample'):null}catch(e){SAMP=null}return SAMP}
+async function getSample(){if(STANDALONE)return aiShim();if(SAMP)return SAMP;try{SAMP=(window.claude&&claude.use)?await claude.use('sample'):null}catch(e){SAMP=null}return SAMP}
 function errInfo(e){
+  if(e&&e.api)return{code:e.code,msg:e.message,raw:e.raw||'',fatal:!!e.fatal};
   var c=(e&&e.code)||'',m=(e&&e.message)||(typeof e==='string'?e:'');
   var map={not_granted:'Permission was not given. Press the button again and choose Allow when Claude asks.',
     sampling_disabled:'Claude calls are switched off for this page (page settings or your organisation).',
@@ -897,7 +1017,7 @@ async function askClaude(prompt,onText){
   try{return await sample(prompt,{signal:ctl.signal,modelTier:S.tier,cache:false,onText:function(p){if(onText)onText(p&&p.text||'')}})}
   catch(e){if(timedOut)throw{code:'timeout',message:'timeout',text:e&&e.text};throw e}
   finally{clearTimeout(timer);S.gen.ctls=S.gen.ctls.filter(function(x){return x!==ctl})}}
-function logw(m,lv){S.gen.log.push({t:new Date(),lv:lv||'',m:m});if(S.gen.log.length>400)S.gen.log.shift()}
+function logw(m,lv){if(STANDALONE)m=String(m).replace(/Claude/g,'the AI');S.gen.log.push({t:new Date(),lv:lv||'',m:m});if(S.gen.log.length>400)S.gen.log.shift()}
 function hms(d){return d.toTimeString().slice(0,8)}
 var liveT=0;
 function schedLive(){if(liveT)return;liveT=setTimeout(function(){liveT=0;live()},350)}
@@ -1018,10 +1138,10 @@ async function replaceSlot(P,s){
 async function testClaude(){
   S.test={st:'run',steps:[]};render();
   var T=S.test,t0=Date.now();
-  function step(name,st,detail){T.steps.push({name:name,st:st,detail:detail||''});render()}
+  function step(name,st,detail){if(STANDALONE){name=String(name).replace(/Claude/g,'AI');detail=String(detail||'').replace(/Claude object present: no · /,'').replace(/Claude/g,'the AI')}T.steps.push({name:name,st:st,detail:detail||''});render()}
   var inFrame=false;try{inFrame=window.top!==window}catch(e){inFrame=true}
   step('Where the page is running','ok','inside a frame: '+(inFrame?'yes':'no')+' \u00b7 Claude object present: '+(window.claude?'yes':'no')+' \u00b7 address: '+location.hostname);
-  var hint=setTimeout(function(){if(T.st==='run'){T.hint='Still waiting. A permission box from Claude may be open (look at the top of the window or in the app) \u2014 choose Allow. If nothing appears at all, Claude calls are not reaching this view.';render()}},15000);
+  var hint=setTimeout(function(){if(T.st==='run'&&!STANDALONE){T.hint='Still waiting. A permission box from Claude may be open (look at the top of the window or in the app) \u2014 choose Allow. If nothing appears at all, Claude calls are not reaching this view.';render()}},15000);
   var tu=Date.now(),sample=await getSample();
   if(!sample){clearTimeout(hint);step('Claude connection','bad','Claude did not answer the page after '+((Date.now()-tu)/1000).toFixed(1)+' s ("sample" capability not available). This usually means the page is opened as a plain web page, in a preview, or in a view where Claude calls are switched off. Open the artifact inside the claude.ai website or the Claude app while signed in.');T.st='bad';render();return}
   step('Claude capability found','ok','the page can ask Claude \u2014 now asking a one-line question');
@@ -1068,7 +1188,7 @@ function doneFlags(){var P=S.cur;return{1:!!S.fw,2:!!BOOK||S.noBook,3:!!S.seen3,
 function stepSummary(n){
   if(n===1)return S.fw?subject()+' · Grade '+grade()+' · '+S.fw.slos.length+' SLOs'+(S.fw.tos[S.tosIdx]?' · '+S.fw.tos[S.tosIdx].label:''):'Upload the framework workbook';
   if(n===2)return BOOK?BOOK.name+' · '+BOOK.pages.length+' pages':(S.noBook?'No textbook':'Upload the textbook');
-  if(n===3)return({claude:'Claude',chatgpt:'ChatGPT',grok:'Grok'})[S.prov]+(S.custom&&S.custom.trim()?' · custom rules':'')+(S.prov==='claude'?(S.connected?' · connected':'')+' · '+({quick:'fast',default:'balanced',complex:'best quality'})[S.tier]:' · copy & paste');
+  if(n===3)return provName()+(S.custom&&S.custom.trim()?' · custom rules':'')+(S.prov==='claude'?(S.connected?' · connected':'')+' · '+(STANDALONE?(aiModel()||'no key yet'):({quick:'fast',default:'balanced',complex:'best quality'})[S.tier]):' · copy & paste');
   if(n===4){var P=S.cur;return P?filled(P)+' of '+allSlots(P).length+' questions ready':'Not started'}
   if(n===5)return S.papers.length?S.papers.length+' version'+(S.papers.length>1?'s':'')+' ready to export':'Nothing to export yet';
   if(n===6)return S.papers.length?'Summary of MCQs, SRQs and CRQs · Excel':'Nothing to summarise yet'}
@@ -1170,21 +1290,22 @@ function bodyBook(){
 
 /* ================= step 3: AI + instructions ================= */
 var CUSTOM_CHIPS=[['Textbook-only & easy questions',CUSTOM_BOOK_TEXT],['MCQ options: 1\u20132 words','- Every MCQ option, including the wrong options (distractors), must be 1 or 2 words only. The correct option must also be 1 or 2 words.'],['Simple Grade-8 wording','- Use short, simple sentences and everyday vocabulary suitable for Grade 8 students.'],['Practical farming examples','- For Apply-level questions, use practical situations from farming in Pakistan.']];
-var PROV=[['claude','Claude','Direct connection — runs inside this page','✨'],['chatgpt','ChatGPT','Demo: copy & paste · direct in the real platform','💬'],['grok','Grok','Demo: copy & paste · direct in the real platform','⚡']];
+var PROV=[['claude',STANDALONE?'AI with a key':'Claude',STANDALONE?'Automatic · a free Gemini key is enough':'Direct connection — runs inside this page','✨'],['chatgpt','ChatGPT','Free chat · copy & paste, no key','💬'],['gemini','Gemini','Free chat · copy & paste, no key','🔷'],['grok','Grok','Free chat · copy & paste, no key','⚡']];
 function testHtml(){
   var T=S.test;if(!T)return '';
-  var h='<div class="log" style="max-height:none">'+T.steps.map(function(x){return '<div>'+(x.st==='ok'?'<span class="tk" style="color:var(--ok)">✔</span>':'<span style="color:var(--bad)">✖</span>')+' <b>'+esc(x.name)+'</b> — '+esc(x.detail)+'</div>'}).join('')+(T.st==='run'?'<div><span class="spin"></span> testing… (the first time Claude asks your permission — choose Allow)</div>':'')+(T.hint?'<div style="color:var(--warn)">'+esc(T.hint)+'</div>':'')+'</div>'+(T.st==='bad'?'<div class="row"><button class="btn ghost sm" data-a="copydiag">Copy these details</button></div>':'');
-  if(T.st==='ok')h=msg('<b>Claude works from this page.</b>'+(T.sample?' Sample question it wrote: <i>'+esc(T.sample.en)+'</i>':''),'ok')+h;
-  if(T.st==='bad')h=msg('<b>Claude could not be used.</b> The reason is shown below — please send me this text if it keeps failing.','bad')+h;
+  var h='<div class="log" style="max-height:none">'+T.steps.map(function(x){return '<div>'+(x.st==='ok'?'<span class="tk" style="color:var(--ok)">✔</span>':'<span style="color:var(--bad)">✖</span>')+' <b>'+esc(x.name)+'</b> — '+esc(x.detail)+'</div>'}).join('')+(T.st==='run'?'<div><span class="spin"></span> testing…'+(STANDALONE?'':' (the first time Claude asks your permission — choose Allow)')+'</div>':'')+(T.hint?'<div style="color:var(--warn)">'+esc(T.hint)+'</div>':'')+'</div>'+(T.st==='bad'?'<div class="row"><button class="btn ghost sm" data-a="copydiag">Copy these details</button></div>':'');
+  if(T.st==='ok')h=msg('<b>'+(STANDALONE?'The AI':'Claude')+' works from this page.</b>'+(T.sample?' Sample question it wrote: <i>'+esc(T.sample.en)+'</i>':''),'ok')+h;
+  if(T.st==='bad')h=msg('<b>'+(STANDALONE?'The AI':'Claude')+' could not be used.</b> The reason is shown below — please send me this text if it keeps failing.','bad')+h;
   return h}
 function bodyAI(){
   var h='<div class="cards3">'+PROV.map(function(p){return '<button class="pc'+(S.prov===p[0]?' on':'')+'" data-a="prov" data-v="'+p[0]+'"><span style="font-size:22px">'+p[3]+'</span><b>'+p[1]+(p[0]==='claude'&&S.connected?' <span class="pill ok">● Connected</span>':'')+'</b><span>'+p[2]+'</span></button>'}).join('')+'</div>';
-  if(S.prov==='claude'){
+  if(S.prov==='claude'&&STANDALONE){h+=aiPanel()}
+  else if(S.prov==='claude'){
     h+='<div class="row"><label class="lb">Speed / quality<select id="tier"><option value="quick"'+(S.tier==='quick'?' selected':'')+'>Fast (simpler questions)</option><option value="default"'+(S.tier==='default'?' selected':'')+'>Balanced (recommended)</option><option value="complex"'+(S.tier==='complex'?' selected':'')+'>Best quality (slower)</option></select></label><button class="btn" data-a="test"'+(S.test&&S.test.st==='run'?' disabled':'')+'>⚡ '+(S.connected?'Re-check connection':'Connect to Claude')+'</button></div>'
      +note('Press <b>Connect to Claude</b> once. The first time, Claude asks for your permission — choose <b>Allow</b>. The page then checks that Claude answers and can write a real question in the format it needs. After that, go to the next step and press Generate.')+testHtml();
   }else{
-    var nm=S.prov==='chatgpt'?'ChatGPT':'Grok';
-    h+=msg(nm+' cannot be called directly from this demo page (the browser does not allow calls to outside services). So the page prepares a ready prompt for each small group of questions: you copy it into '+nm+', copy its reply back here, and press Apply. In the real platform this becomes a direct connection with your own key.','info')}
+    var nm=provName();
+    h+=msg('No key and no paid plan needed. The page prepares a ready prompt for each small group of questions: you copy it into the free '+nm+' chat, copy its reply back here, and press Apply.','info')}
   h+='<label class="lb">Instructions to make paper (edit freely — these rules are sent with every request)<textarea id="instr" rows="10" class="txt" style="width:100%;font-size:13px;line-height:1.55" dir="ltr">'+esc(instrText())+'</textarea></label>'
    +'<div class="row"><button class="lnk" data-a="rinstr">Restore the default instructions</button></div>'
    +note('You never need to describe the answer format — the page adds it automatically. Your instructions are remembered in this browser.');
@@ -1200,9 +1321,9 @@ function startPanel(can){
   var h='<div class="stats">'+stat(b.label,'Paper')+stat(tosSum(b,'mcq')+' / '+tosSum(b,'srq')+' / '+tosSum(b,'crq'),'MCQ / SRQ / CRQ')+stat(n,'Questions to write')+stat(S.prov==='claude'?calls:'—','Claude calls')+'</div>';
   if(!BOOK&&!S.noBook)h+=msg('No textbook was uploaded. <label class="chk"><input type="checkbox" id="nobook"> Generate without a textbook</label>');
   h+=note(S.prov==='claude'?'Questions are written in small groups (at most '+CHUNK+' per call) and appear below <b>as Claude writes them</b>. Expect roughly '+Math.max(1,Math.round(calls*30/2/60))+'–'+Math.max(2,Math.round(calls*60/2/60))+' minutes in total. Every problem is listed in the activity log.'
-    :'The page will make the plan (which unit, SLO and level each question comes from) and prepare one prompt per small group of questions for '+(S.prov==='chatgpt'?'ChatGPT':'Grok')+'.');
+    :'The page will make the plan (which unit, SLO and level each question comes from) and prepare one prompt per small group of questions for '+(provName())+'.');
   if(S.prov==='claude')h+='<div class="sub" style="padding:12px;display:flex;flex-direction:column;gap:8px"><b>How many versions? <span class="note">(different papers made from the same book)</span></b><div class="row"><button class="btn ghost sm" data-a="nv" data-v="-1" aria-label="Fewer versions">−</button><input class="txt" id="nVer" value="'+S.nVer+'" style="width:64px;text-align:center" inputmode="numeric" aria-label="Number of versions"><button class="btn ghost sm" data-a="nv" data-v="1" aria-label="More versions">+</button><span class="note">1 to 15 · about '+(calls*S.nVer)+' Claude calls · roughly '+Math.max(1,Math.round(calls*S.nVer*40/2/60))+' min</span></div><div class="note">Version-1 appears first, so you can start reviewing while the others are still being written. Every version gets different questions.</div></div>';
-  h+='<div class="row"><button class="btn big" data-a="draft"'+(can?'':' disabled')+'>'+(S.prov==='claude'?'✨ Generate '+(S.nVer>1?S.nVer+' versions':'first draft'):'Make the plan & prompts')+'</button>'+(S.prov==='claude'?'<button class="btn ghost" data-a="test">⚡ '+(S.connected?'Re-check connection':'Connect to Claude first')+'</button>':'')+'</div>';
+  h+='<div class="row"><button class="btn big" data-a="draft"'+(can?'':' disabled')+'>'+(S.prov==='claude'?'✨ Generate '+(S.nVer>1?S.nVer+' versions':'first draft'):'Make the plan & prompts')+'</button>'+(S.prov==='claude'?'<button class="btn ghost" data-a="test">⚡ '+(S.connected?'Re-check connection':(STANDALONE?'Test the AI first':'Connect to Claude first'))+'</button>':'')+'</div>';
   if(S.test)h+=testHtml();
   return h}
 function planTable(P){
@@ -1223,7 +1344,7 @@ function tileHtml(j){
   if(j.raw&&(j.st==='fail'||j.st==='part'))h+=det('raw'+j.id,'Show what Claude replied','<div class="live">'+esc(j.raw.slice(0,1500))+'</div>');
   return h+'</div>'}
 function manPanel(){
-  var m=S.man;if(!m)return '';var nm=S.prov==='chatgpt'?'ChatGPT':S.prov==='grok'?'Grok':'the AI';
+  var m=S.man;if(!m)return '';var nm=provName();
   return '<div class="sub" style="padding:12px;display:flex;flex-direction:column;gap:10px"><b>'+esc(jobTitle(m.job))+' — '+m.sub.length+' question'+(m.sub.length>1?'s':'')+'</b>'
    +'<label class="lb">1) Copy this prompt into '+nm+'<textarea id="manP" rows="6" readonly class="txt" style="width:100%;font-size:12px" dir="ltr">'+esc(m.prompt)+'</textarea></label><div class="row"><button class="btn sm" data-a="mancopy">Copy prompt</button></div>'
    +'<label class="lb">2) Paste '+nm+'’s reply here<textarea id="manIn" rows="6" class="txt" style="width:100%;font-size:12px" dir="ltr" placeholder="{ &quot;items&quot;: [ … ] }"></textarea></label>'
@@ -1347,7 +1468,7 @@ function renderToast(){var b=$('#toastBox');if(!b)return;b.innerHTML=S.toast?'<d
 /* ================= render ================= */
 function render(){
   var y=window.scrollY,dn=doneFlags(),lk=locks();
-  var h='<div class="hero"><div><h1>Paper Maker</h1><p>Framework + textbook → a bilingual draft you can review → final Word paper with Answer Key & Rubrics.</p></div><span class="badge-demo">Registered teacher · demo</span></div>'
+  var h='<div class="hero"><div><h1>PECTAA AI Powered Item Generator</h1><p>Framework + textbook → a bilingual draft you can review → final Word paper with Answer Key & Rubrics.</p></div><span class="badge-demo">Teacher edition</span></div>'
    +'<nav class="stepper" aria-label="Steps">'+STEPS.map(function(s){return '<button class="st'+(S.step===s[0]?' on':'')+(dn[s[0]]?' done':'')+'" data-a="step" data-v="'+s[0]+'"'+(lk[s[0]]?' disabled':'')+'><span class="c">'+(dn[s[0]]?'✓':s[0])+'</span>'+s[1]+'</button>'}).join('')+'</nav>'
    +card(1,'Framework workbook',bodyFw)+card(2,'Textbook',bodyBook)+card(3,'AI & instructions',bodyAI)+card(4,'Draft & review',bodyDraft)+card(5,'Final Word files',bodyFinal)+card(6,'Excel summary',bodySum)
    +'<footer>Urdu text in the Word files uses the Jameel Noori Nastaleeq font — install it on your computer for the intended look. AI-written questions must be read and checked by a teacher before use.</footer>';
@@ -1400,6 +1521,7 @@ document.addEventListener('click',async function(ev){
   if(a==='tos'){S.tosIdx=+v;S.spec=specFromTos(S.fw.tos[S.tosIdx])}
   else if(a==='prov'){S.prov=v;S.man=null;saveStore()}
   else if(a==='test'){await getSample();await testClaude();return}
+  else if(a==='aiconn'){var ke=document.getElementById('aikey');if(ke)AI.keys[AI.svc]=ke.value.trim();aiSave();AI.err='';AI.busy=true;S.test=null;S.connected=false;render();try{await aiLoadModels()}catch(e){AI.lists[AI.svc]=[];AI.err=(e&&e.message)||'Could not connect.'}AI.busy=false}
   else if(a==='rinstr'){S.instr='';saveStore()}
   else if(a==='addc'){var ta0=document.getElementById('custom'),cur=(ta0?ta0.value:S.custom).replace(/\s+$/,'');var line=CUSTOM_CHIPS[+v][1];if(cur.indexOf(line)<0)S.custom=(cur?cur+'\n':'')+line;saveStore()}
   else if(a==='clearc'){S.custom='';saveStore()}
@@ -1476,6 +1598,9 @@ document.addEventListener('change',async function(ev){
   if(id==='instr'){S.instr=t.value;saveStore();return}
   if(id==='custom'){S.custom=t.value;saveStore();render();return}
   if(id==='tier'){S.tier=t.value;saveStore();render();return}
+  if(id==='aisvc'){AI.svc=t.value;AI.err='';S.test=null;S.connected=false;aiSave();render();return}
+  if(id==='aimodel'){AI.models[AI.svc]=t.value;S.test=null;S.connected=false;aiSave();render();return}
+  if(id==='aikey'){AI.keys[AI.svc]=t.value.trim();aiSave();return}
   if(id==='strict'||id==='easy'){S[id]=t.checked;saveStore();render();return}
   if(id==='nobook'){S.noBook=t.checked;render();return}
   if(id==='peekN'){var pn=parseInt(t.value,10);if(pn>0)S.peek=Math.min(BOOK.pages.length,pn);render();return}
@@ -1519,7 +1644,7 @@ document.addEventListener('drop',function(e){
 document.addEventListener('dragend',function(){S.drag=null;S.pressing=false;document.querySelectorAll('.qc.over,.qc.dragging').forEach(function(x){x.classList.remove('over');x.classList.remove('dragging')})});
 
 window.__PM={pageFixed:pageFixed,groundCheck:groundCheck,bookOn:bookOn,buildSummary:buildSummary,verifySummary:verifySummary,summaryRows:summaryRows,sumChecks:sumChecks,S:S,get BOOK(){return BOOK},render:render,planSlots:planSlots,specFromTos:specFromTos,insFor:insFor,paperData:paperData,slotsPrompt:slotsPrompt,extractItems:extractItems,matchPages:matchPages,evalBook:evalBook,errInfo:errInfo,makeJobs:makeJobs};
-loadStore();render();
+loadStore();aiLoad();render();
 
 })();
 </script>
