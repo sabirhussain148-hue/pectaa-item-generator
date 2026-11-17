@@ -598,8 +598,8 @@ var SVC={
  groq:{n:'Groq — free key available',base:'https://api.groq.com/openai/v1',keyUrl:'https://console.groq.com/keys',tip:'Free: make an account and create a key. Fast, but weaker at Urdu than Gemini.'},
  openai:{n:'OpenAI (ChatGPT) — paid key',base:'https://api.openai.com/v1',keyUrl:'https://platform.openai.com/api-keys',tip:'Needs a paid OpenAI API account. A ChatGPT Plus subscription is not an API key.'}};
 var AI={svc:'gemini',keys:{},models:{},lists:{},ok:{},busy:false,err:'',info:''};
-function aiSave(){try{localStorage.setItem('pm_ai',JSON.stringify({svc:AI.svc,keys:AI.keys,models:AI.models,ok:AI.ok}))}catch(e){}}
-function aiLoad(){try{var o=JSON.parse(localStorage.getItem('pm_ai')||'null');if(o){if(SVC[o.svc])AI.svc=o.svc;AI.keys=o.keys||{};AI.models=o.models||{};AI.ok=o.ok||{}}}catch(e){}}
+function aiSave(){try{localStorage.setItem('pm_ai',JSON.stringify({svc:AI.svc,models:AI.models,ok:AI.ok}))}catch(e){}}
+function aiLoad(){try{var o=JSON.parse(localStorage.getItem('pm_ai')||'null');if(o){if(SVC[o.svc])AI.svc=o.svc;AI.keys={};AI.models=o.models||{};AI.ok=o.ok||{}}}catch(e){}}
 function aiKey(){return (AI.keys[AI.svc]||'').trim()}
 function aiModel(){return AI.models[AI.svc]||''}
 function aiErr(code,message,fatal,raw){return{api:true,code:code,message:message,fatal:!!fatal,raw:raw||''}}
@@ -820,7 +820,7 @@ var DEFAULT_RULES='- Use only facts supported by the textbook passages. Never me
 
 var BOOK_RULES='TEXTBOOK-ONLY RULES (strict):\n- Read every textbook passage below carefully and completely before you write. Every question, every option and every sample answer must come ONLY from those passages. Do not use outside knowledge, general facts or examples that are not in the passages, even if they are true.\n- MCQ: the question statement, the concept it tests and the correct option must all be stated in the passages. The wrong options (distractors) must be plausible words, names or values taken from the same passages or the same chapter; never bring in a concept that is not in the book.\n- SRQ and CRQ: the answer must be written in the passages, in plain words, so that a student who studied the book can answer 100% from it. Build the sample answer only from the passages (you may shorten or lightly reword, but add no new facts, numbers or examples).\n- If the passages do not cover the SLO well, ask about the closest fact that IS in the passages (same topic) instead of using outside knowledge.\n- For every item also add "src": the exact words copied from the passage (1–2 sentences, at most 300 characters, copied character for character in the passage\'s own language) that prove the correct answer, and "pg": the textbook page number shown above that passage. "src" is only used for checking; never mention it, the passage or any page number inside the question.';
 var EASY_RULES='SIMPLE WORDING FOR STUDENTS (strict):\n- The students are children. SRQ and CRQ questions must be SHORT (one sentence, at most about 15–20 English words; Urdu the same) and use easy, everyday words. No long, stacked or multi-part sentences and no difficult vocabulary.\n- Even when the cognitive level is Application+ (or Analysis), keep the wording easy: ask in an understanding-style way ("Why is … important?", "How does … help?", "Give two reasons …", "What happens if …?") and make sure the answer is written plainly in the book.\n- Sample answers: short, clear sentences in simple words. SRQ answer: 1–2 short lines. CRQ answer: exactly 5 short numbered points.';
-function bookOn(){return !!BOOK&&S.strict!==false&&BOOK.quality!=='none'}
+function bookOn(){return !!BOOK&&S.strict!==false&&BOOK.quality==='good'}
 var NPAGE={};
 function normPageStr(i){var k=BOOK.name+'|'+BOOK.fix+'|'+BOOK.ocrN+'|'+i;if(NPAGE[k]===undefined)NPAGE[k]=' '+normTxt(pageFixed(BOOK.pages[i])).toLowerCase().replace(/[^\p{L}\p{N}]+/gu,' ').trim()+' ';return NPAGE[k]}
 function groundCheck(src,pg,slot){ // is the quoted sentence really in the textbook?  -> {ok,pages}
@@ -841,12 +841,12 @@ function slotsPrompt(slots,avoid){
   var ids=[];slots.forEach(function(s){if(ids.indexOf(s.slo)<0)ids.push(s.slo)});
   var per=Math.max(1500,Math.floor(48000/ids.length));
   var src=ids.map(function(id){var s=sloById(id),p=BOOK?passageFor(s,per,3):{text:'',pages:[]};slots.forEach(function(x){if(x.slo===id)x.pages=p.pages});
-    return 'SLO '+id+' (Urdu): '+s.text+'\n'+(p.text||''+(bookOn()?'(no textbook passage was found for this SLO. Ask about the closest topic that appears in the other passages below; only if nothing fits, write it from standard facts for this grade and leave "src" empty.)':'(no textbook passage found for this SLO — use only standard, widely accepted facts for this grade level)')+'\n')}).join('\n');
+    return 'SLO '+id+' (Urdu): '+s.text+'\n'+(p.text||''+(bookOn()?'(no textbook passage was found for this SLO. Ask about the closest topic that appears in the other passages below; if no source evidence exists, do not create a question for this SLO.)':'(no textbook passage found for this SLO — use only the supplied SLO statement and framework alignment; do not add outside facts)')+'\n')}).join('\n');
   var items=slots.map(function(s,i){return(i+1)+'. '+s.type.toUpperCase()+' — SLO '+s.slo+' — cognitive level '+s.level+' ('+LV_DESC[s.level]+')'+(s.type==='srq'?' — '+S.spec.srq.marks+' marks':s.type==='crq'?' — '+S.spec.crq.marks+' marks':'')}).join('\n');
   return 'You are an experienced Pakistani school-assessment specialist writing bilingual (English and Urdu) test items for Grade '+grade()+' '+subject()+'.\n\n'
    +'INSTRUCTIONS FOR MAKING THE PAPER:\n'+instrText()+'\n\n'
    +(bookOn()?BOOK_RULES+'\n\n':'')+(S.easy!==false?EASY_RULES+'\n\n':'')
-   +((S.custom&&S.custom.trim())?'CUSTOM INSTRUCTIONS FROM THE TEACHER (follow these strictly; where they conflict with the instructions above, these win):\n'+S.custom.trim()+'\n\n':'')
+   +((S.custom&&S.custom.trim())?'CUSTOM INSTRUCTIONS FROM THE TEACHER (follow these where consistent with source-grounding and validation rules; never override evidence requirements):\n'+S.custom.trim()+'\n\n':'')
    +'STUDENT LEARNING OUTCOMES AND TEXTBOOK PASSAGES (the passages may contain extraction noise or mixed word order):\n'+src+'\n'
    +'WRITE EXACTLY THESE '+slots.length+' ITEMS (each tests the SLO named; follow the cognitive level):\n'+items+'\n\n'
    +(avoid&&avoid.length?'Do NOT repeat or paraphrase these existing questions:\n'+avoid.slice(0,60).map(function(x){return '- '+x}).join('\n')+'\n\n':'')
@@ -869,7 +869,7 @@ function qFromRaw(r,slot){
 function applyItems(slots,o){
   var arr=o&&Array.isArray(o.items)?o.items:(o&&Array.isArray(o)?o:[]),done=0;
   arr.forEach(function(r){var slot=slots[(parseInt(r.n,10)||0)-1];if(!slot)return;var q=qFromRaw(r,slot);
-    if(q){setGround(q,r,slot);slot.q=q;slot.st='ok';slot.err='';done++}});
+    if(q){var evidence=setGround(q,r,slot);if(bookOn()&&(!evidence||!evidence.ok))return;slot.q=q;slot.st='ok';slot.err='';done++}});
   slots.forEach(function(s){if(!s.q&&s.st!=='ok'){s.st='fail'}});
   return done}
 function allSlots(P){return[].concat(P.mcq,P.srq,P.crq)}
@@ -882,7 +882,7 @@ function paperData(P){
     srq:P.srq.map(function(s){return{en:s.q.en,ur:s.q.ur,en_ans:s.q.en_ans,ur_ans:s.q.ur_ans}}),
     crq:P.crq.map(function(s){return{en:s.q.en,ur:s.q.ur,en_ans:s.q.en_ans,ur_ans:s.q.ur_ans}}),
     ins1:ins.ins1,ins2:ins.ins2,ins3:ins.ins3,srqMarks:P.spec.srq.marks,crqMarks:P.spec.crq.marks}}
-function paperReady(P){return allSlots(P).length>0&&allSlots(P).every(function(s){return s.q})}
+function paperReady(P){return allSlots(P).length>0&&allSlots(P).every(function(s){return !!s.q&&(!bookOn()||s.q.grounded===true)})}
 function paperFile(P,key){return'V_'+P.ver+'_'+subject().replace(/[\s\\\/:*?"<>|]+/g,'_')+'_Grade-'+grade()+'_'+P.tos.replace(/[^A-Za-z0-9]+/g,'_').replace(/_$/,'')+(key?'_Answer_Key_and_Rubrics':'')+'.docx'}
 
 
@@ -1066,7 +1066,7 @@ function applyReply(sub,text,seen,job){
     if(seen[k])return;var slot=sub[k-1];if(!slot)return;
     var q=qFromRaw(r,slot);if(!q)return;
     var g=setGround(q,r,slot);
-    if(g&&!g.ok&&job&&job.tries<2&&slot.pages&&slot.pages.length){job.rej=job.rej||{};job.rej[k]=1;return} // first attempt: a question whose source sentence is not in the book is written again
+    if(bookOn()&&(!g||!g.ok)){if(job){job.rej=job.rej||{};job.rej[k]=1}return} // Never accept unverified textbook evidence, even after retries
     slot.q=q;slot.st='ok';seen[k]=1;n++;if(job&&job.rej)delete job.rej[k]});
   return n}
 async function runJob(job){
