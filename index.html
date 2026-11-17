@@ -597,9 +597,9 @@ var SVC={
  openrouter:{n:'OpenRouter — many free models',base:'https://openrouter.ai/api/v1',keyUrl:'https://openrouter.ai/keys',tip:'Free: make an account, create a key, and choose a model marked (free).'},
  groq:{n:'Groq — free key available',base:'https://api.groq.com/openai/v1',keyUrl:'https://console.groq.com/keys',tip:'Free: make an account and create a key. Fast, but weaker at Urdu than Gemini.'},
  openai:{n:'OpenAI (ChatGPT) — paid key',base:'https://api.openai.com/v1',keyUrl:'https://platform.openai.com/api-keys',tip:'Needs a paid OpenAI API account. A ChatGPT Plus subscription is not an API key.'}};
-var AI={svc:'gemini',keys:{},models:{},lists:{},busy:false,err:''};
-function aiSave(){try{localStorage.setItem('pm_ai',JSON.stringify({svc:AI.svc,keys:AI.keys,models:AI.models}))}catch(e){}}
-function aiLoad(){try{var o=JSON.parse(localStorage.getItem('pm_ai')||'null');if(o){if(SVC[o.svc])AI.svc=o.svc;AI.keys=o.keys||{};AI.models=o.models||{}}}catch(e){}}
+var AI={svc:'gemini',keys:{},models:{},lists:{},ok:{},busy:false,err:'',info:''};
+function aiSave(){try{localStorage.setItem('pm_ai',JSON.stringify({svc:AI.svc,keys:AI.keys,models:AI.models,ok:AI.ok}))}catch(e){}}
+function aiLoad(){try{var o=JSON.parse(localStorage.getItem('pm_ai')||'null');if(o){if(SVC[o.svc])AI.svc=o.svc;AI.keys=o.keys||{};AI.models=o.models||{};AI.ok=o.ok||{}}}catch(e){}}
 function aiKey(){return (AI.keys[AI.svc]||'').trim()}
 function aiModel(){return AI.models[AI.svc]||''}
 function aiErr(code,message,fatal,raw){return{api:true,code:code,message:message,fatal:!!fatal,raw:raw||''}}
@@ -627,19 +627,19 @@ async function aiFetch(url,init,signal){
 function aiHeaders(){var k=aiKey();return AI.svc==='gemini'?{'x-goog-api-key':k,'Content-Type':'application/json'}:{'Authorization':'Bearer '+k,'Content-Type':'application/json'}}
 function verNum(id){var m=/(\d+(?:\.\d+)?)/.exec(id);return m?parseFloat(m[1]):0}
 async function aiLoadModels(){
-  var sv=AI.svc,list=[],bad=/image|tts|live|embed|audio|robotic|computer|native|whisper|guard|moderat|realtime|transcri|dall|sora|speech|rerank|search/i;
+  var sv=AI.svc,list=[],bad=/image|tts|live|embed|audio|robotic|computer|native|whisper|guard|moderat|realtime|transcri|dall|sora|speech|rerank|search|custom|omni|banana|clip/i;
   if(sv==='gemini'){
     var j=await aiFetch('https://generativelanguage.googleapis.com/v1beta/models?pageSize=200',{headers:aiHeaders()});
     (j.models||[]).forEach(function(m){var id=String(m.name||'').replace(/^models\//,'');
       if(/^gemini-/.test(id)&&(m.supportedGenerationMethods||[]).indexOf('generateContent')>=0&&!bad.test(id))list.push({id:id,label:m.displayName||id})});
-    var rank=function(x){return verNum(x.id)*10+(/flash/.test(x.id)?(/lite/.test(x.id)?2:3):1)-(/preview|exp/.test(x.id)?0.5:0)};
+    var rank=function(x){return (/flash/.test(x.id)?(/lite/.test(x.id)?1000:2000):0)+verNum(x.id)*10-(/preview|exp/.test(x.id)?0.5:0)};
     list.sort(function(a,b){return rank(b)-rank(a)});
   }else if(sv==='openrouter'){
     var j2=await aiFetch(SVC[sv].base+'/models',{});
     var fr=[],pd=[];(j2.data||[]).forEach(function(m){var out=(m.architecture&&m.architecture.output_modalities)||['text'];if(out.indexOf('text')<0)return;
       var free=/:free$/.test(m.id)||(m.pricing&&+m.pricing.prompt===0&&+m.pricing.completion===0);
       var img=((m.architecture&&m.architecture.input_modalities)||[]).indexOf('image')>=0;
-      (free?fr:pd).push({id:m.id,label:(free?'':'(paid) ')+(m.name||m.id)+(free&&!/free/i.test(m.name||'')?' (free)':''),img:img,ctx:m.context_length||0})});
+      (free?fr:pd).push({free:free,id:m.id,label:(free?'':'(paid) ')+(m.name||m.id)+(free&&!/free/i.test(m.name||'')?' (free)':''),img:img,ctx:m.context_length||0})});
     fr.sort(function(a,b){return (b.img-a.img)||(b.ctx-a.ctx)});
     list=fr.concat(pd);
     if(aiKey())await aiFetch(SVC[sv].base+'/key',{headers:aiHeaders()});
@@ -654,13 +654,8 @@ async function aiLoadModels(){
   if(!AI.models[sv]||!list.some(function(x){return x.id===AI.models[sv]}))AI.models[sv]=list[0].id;
   aiSave();return list}
 function blobB64(b){return new Promise(function(res,rej){var fr=new FileReader();fr.onload=function(){res(String(fr.result).split(',')[1]||'')};fr.onerror=rej;fr.readAsDataURL(b)})}
-var aiGate=Promise.resolve();
-async function apiSample(prompt,opts){
-  opts=opts||{};var sv=AI.svc,model=aiModel(),sig=opts.signal;
-  if(!aiKey())throw aiErr('no_key','No key has been entered yet. Open step 3, paste your key and press Connect.',true);
-  if(!model)throw aiErr('no_model','No model is chosen yet. Open step 3 and press Connect.',true);
-  var imgs=[];if(opts.images)for(var i=0;i<opts.images.length;i++)imgs.push(await blobB64(opts.images[i]));
-  var url,body;
+async function aiCall(model,prompt,imgs,sig){
+  var sv=AI.svc,url,body;
   if(sv==='gemini'){
     url='https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(model)+':generateContent';
     body={contents:[{role:'user',parts:[{text:prompt}].concat(imgs.map(function(d){return{inlineData:{mimeType:'image/jpeg',data:d}}}))}]};
@@ -668,15 +663,7 @@ async function apiSample(prompt,opts){
     url=SVC[sv].base+'/chat/completions';
     body={model:model,messages:[{role:'user',content:imgs.length?[{type:'text',text:prompt}].concat(imgs.map(function(d){return{type:'image_url',image_url:{url:'data:image/jpeg;base64,'+d}}})):prompt}]};
   }
-  var j=null;
-  for(var attempt=1;;attempt++){
-    try{j=await aiFetch(url,{method:'POST',headers:aiHeaders(),body:JSON.stringify(body)},sig);break}
-    catch(e){
-      var retry=e&&e.api&&((e.code==='rate_limited'&&!e.daily&&(e.wait||0)<=90)||e.code==='upstream_error'||e.code==='network');
-      if(!retry||attempt>=4)throw e;
-      var w=e.code==='rate_limited'?Math.max(8,Math.ceil(e.wait||20)+2):5*attempt;
-      try{logw('The AI service asked us to slow down — waiting '+w+' s, then trying again (attempt '+(attempt+1)+' of 4).','warn');render()}catch(x){}
-      await aiWait(w*1000,sig)}}
+  var j=await aiFetch(url,{method:'POST',headers:aiHeaders(),body:JSON.stringify(body)},sig);
   var text='',trunc=false;
   if(sv==='gemini'){
     var c=j.candidates&&j.candidates[0];
@@ -691,8 +678,49 @@ async function apiSample(prompt,opts){
     trunc=ch.finish_reason==='length';
   }
   if(!text)throw aiErr('empty','The AI returned an empty answer. Try again or choose another model.',false);
-  if(opts.onText)try{opts.onText({text:text})}catch(e){}
   return{text:text,truncated:trunc}}
+function aiProbeList(){
+  var sv=AI.svc,list=AI.lists[sv]||[];
+  if(sv==='gemini'){var f=list.filter(function(x){return /flash/.test(x.id)&&!/lite/.test(x.id)}).slice(0,5),l=list.filter(function(x){return /lite/.test(x.id)}).slice(0,3);return f.concat(l)}
+  if(sv==='openrouter')return list.filter(function(x){return x.free}).slice(0,6);
+  return list.slice(0,sv==='groq'?3:1)}
+async function aiProbe(){
+  var sv=AI.svc,cands=aiProbeList(),why='';
+  (AI.lists[sv]||[]).forEach(function(m){m.st=''});
+  await Promise.all(cands.map(async function(m){var ctl=new AbortController(),t=setTimeout(function(){ctl.abort()},25000);
+    try{await aiCall(m.id,'Reply with exactly this JSON and nothing else: {"ok":true}',[],ctl.signal);m.st='ok'}
+    catch(e){m.st=(e&&e.code==='cancelled')?'slow':(e&&e.code==='rate_limited')?'limit':'busy';if(e&&e.code==='bad_key')why=e.message;else if(!why&&e&&e.message)why=e.message}
+    clearTimeout(t)}));
+  AI.ok[sv]=cands.filter(function(m){return m.st==='ok'}).map(function(m){return m.id});
+  if(AI.ok[sv].length){
+    var cur=AI.models[sv],curSt=((AI.lists[sv]||[]).filter(function(m){return m.id===cur})[0]||{}).st;
+    if(AI.ok[sv].indexOf(cur)<0&&(curSt||!cur)){AI.models[sv]=AI.ok[sv][0]}
+    if(AI.ok[sv].indexOf(AI.models[sv])<0)AI.models[sv]=AI.ok[sv][0];
+    AI.info=AI.ok[sv].length+' of '+cands.length+' checked models are answering now. Chosen: '+AI.models[sv]+'. If a model gets busy later, the page switches to another working one by itself.';
+  }else{AI.info='';AI.err='No model answered just now (busy, or the free limit is used up). '+(why?why+' ':'')+'Try again in a few minutes, or choose another AI service.'}
+  aiSave()}
+function aiChain(){var sv=AI.svc,m=aiModel(),o=(AI.ok[sv]||[]).filter(function(x){return x!==m});return [m].concat(o).slice(0,4)}
+async function apiSample(prompt,opts){
+  opts=opts||{};var sig=opts.signal;
+  if(!aiKey())throw aiErr('no_key','No key has been entered yet. Open step 3, paste your key and press Connect.',true);
+  if(!aiModel())throw aiErr('no_model','No model is chosen yet. Open step 3 and press Connect.',true);
+  var imgs=[];if(opts.images)for(var i=0;i<opts.images.length;i++)imgs.push(await blobB64(opts.images[i]));
+  var chain=aiChain(),last=null;
+  for(var ci=0;ci<chain.length;ci++){
+    var tries=ci===chain.length-1?4:1;
+    for(var attempt=1;attempt<=tries;attempt++){
+      try{var r=await aiCall(chain[ci],prompt,imgs,sig);
+        if(ci>0){try{logw('“'+chain[0]+'” was busy, so “'+chain[ci]+'” answered instead.','warn')}catch(x){}}
+        if(opts.onText)try{opts.onText({text:r.text})}catch(x){}
+        return r}
+      catch(e){last=e;
+        var soft=e&&e.api&&['rate_limited','upstream_error','network','empty','blocked','bad_model','no_credit'].indexOf(e.code)>=0;
+        if(!soft)throw e;
+        if(attempt>=tries||(e.code==='rate_limited'&&(e.daily||(e.wait||0)>90)))break;
+        var w=e.code==='rate_limited'?Math.max(8,Math.ceil(e.wait||20)+2):5*attempt;
+        try{logw('The AI service is busy — waiting '+w+' s, then trying again (attempt '+(attempt+1)+' of '+tries+').','warn');render()}catch(x){}
+        await aiWait(w*1000,sig)}}}
+  throw last}
 apiSample.limits=async function(){return{images:{maxCount:3}}};
 function aiShim(){return apiSample}
 function provName(){return({claude:STANDALONE?'AI key':'Claude',chatgpt:'ChatGPT',grok:'Grok',gemini:'Gemini'})[S.prov]||'the AI'}
@@ -702,9 +730,9 @@ function aiPanel(){
    +'<div class="row"><label class="lb">AI service<select id="aisvc">'+Object.keys(SVC).map(function(k){return '<option value="'+k+'"'+(k===sv?' selected':'')+'>'+esc(SVC[k].n)+'</option>'}).join('')+'</select></label></div>'
    +note(esc(d.tip)+' <a href="'+d.keyUrl+'" target="_blank" rel="noopener">Get a key ↗</a>')
    +'<label class="lb">Paste your key<input id="aikey" class="txt" type="password" autocomplete="off" spellcheck="false" dir="ltr" style="width:100%" value="'+esc(AI.keys[sv]||'')+'" placeholder="paste the key here"></label>'
-   +'<div class="row"><button class="btn" data-a="aiconn"'+(AI.busy?' disabled':'')+'>'+(AI.busy?'<span class="spin"></span> Loading…':(list.length?'Reload models':'Connect — load models'))+'</button>'
-   +(list.length?'<label class="lb">Model<select id="aimodel">'+list.map(function(m){return '<option value="'+esc(m.id)+'"'+(m.id===aiModel()?' selected':'')+'>'+esc(m.label)+'</option>'}).join('')+'</select></label>':'')+'</div>';
-  if(AI.err)h+=msg(esc(AI.err),'bad');
+   +'<div class="row"><button class="btn" data-a="aiconn"'+(AI.busy?' disabled':'')+'>'+(AI.busy?'<span class="spin"></span> Checking which models answer\u2026 (up to 30 s)':(list.length?'Reload models':'Connect — load models'))+'</button>'
+   +(list.length?'<label class="lb">Model<select id="aimodel">'+list.map(function(m){return '<option value="'+esc(m.id)+'"'+(m.id===aiModel()?' selected':'')+'>'+esc(m.label)+(m.st==='ok'?' ✓ working':m.st==='limit'?' — limit used up':m.st?' — busy now':'')+'</option>'}).join('')+'</select></label>':'')+'</div>';
+  if(AI.err)h+=msg(esc(AI.err),'bad');else if(AI.info&&list.length)h+=msg(esc(AI.info),'ok');
   if(list.length)h+='<div class="row"><button class="btn" data-a="test"'+(S.test&&S.test.st==='run'?' disabled':'')+'>⚡ '+(S.connected?'Test again':'Test this model')+'</button></div>'
      +note('Press <b>Test this model</b> once. The page checks that the AI answers and can write a real question in the needed format. Then go to the next step and press Generate.'+(sv==='gemini'?' On a free Gemini key each model has a small daily limit; if it runs out, choose another model in the list.':''));
   else h+=note('No paid plan is needed: a free Google Gemini key is enough. If you do not want to make any key at all, choose ChatGPT, Gemini or Grok above — the page gives you a ready prompt to copy into the free chat and you paste the reply back.');
@@ -1521,7 +1549,7 @@ document.addEventListener('click',async function(ev){
   if(a==='tos'){S.tosIdx=+v;S.spec=specFromTos(S.fw.tos[S.tosIdx])}
   else if(a==='prov'){S.prov=v;S.man=null;saveStore()}
   else if(a==='test'){await getSample();await testClaude();return}
-  else if(a==='aiconn'){var ke=document.getElementById('aikey');if(ke)AI.keys[AI.svc]=ke.value.trim();aiSave();AI.err='';AI.busy=true;S.test=null;S.connected=false;render();try{await aiLoadModels()}catch(e){AI.lists[AI.svc]=[];AI.err=(e&&e.message)||'Could not connect.'}AI.busy=false}
+  else if(a==='aiconn'){var ke=document.getElementById('aikey');if(ke)AI.keys[AI.svc]=ke.value.trim();aiSave();AI.err='';AI.busy=true;S.test=null;S.connected=false;render();AI.info='';try{await aiLoadModels();await aiProbe()}catch(e){AI.lists[AI.svc]=[];AI.err=(e&&e.message)||'Could not connect.'}AI.busy=false}
   else if(a==='rinstr'){S.instr='';saveStore()}
   else if(a==='addc'){var ta0=document.getElementById('custom'),cur=(ta0?ta0.value:S.custom).replace(/\s+$/,'');var line=CUSTOM_CHIPS[+v][1];if(cur.indexOf(line)<0)S.custom=(cur?cur+'\n':'')+line;saveStore()}
   else if(a==='clearc'){S.custom='';saveStore()}
@@ -1598,8 +1626,8 @@ document.addEventListener('change',async function(ev){
   if(id==='instr'){S.instr=t.value;saveStore();return}
   if(id==='custom'){S.custom=t.value;saveStore();render();return}
   if(id==='tier'){S.tier=t.value;saveStore();render();return}
-  if(id==='aisvc'){AI.svc=t.value;AI.err='';S.test=null;S.connected=false;aiSave();render();return}
-  if(id==='aimodel'){AI.models[AI.svc]=t.value;S.test=null;S.connected=false;aiSave();render();return}
+  if(id==='aisvc'){AI.svc=t.value;AI.err='';AI.info='';S.test=null;S.connected=false;aiSave();render();return}
+  if(id==='aimodel'){AI.info='';AI.models[AI.svc]=t.value;S.test=null;S.connected=false;aiSave();render();return}
   if(id==='aikey'){AI.keys[AI.svc]=t.value.trim();aiSave();return}
   if(id==='strict'||id==='easy'){S[id]=t.checked;saveStore();render();return}
   if(id==='nobook'){S.noBook=t.checked;render();return}
